@@ -367,7 +367,7 @@ function App() {
               <CalendarDays size={18} aria-hidden="true" />
               يبدأ من اليوم
             </span>
-            <h1>متتبع خطة العمل</h1>
+            <h1> خُطّة </h1>
             <p>
               {formatDate(plan.startDate)} - {formatDate(planEndDate)}
             </p>
