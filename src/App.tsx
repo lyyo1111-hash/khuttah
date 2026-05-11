@@ -27,6 +27,7 @@ type LegacyStoredPlan = Partial<StoredPlan> & {
 };
 
 type DayStatus = "empty" | "complete" | "partial" | "none";
+type CalendarMode = "gregorian" | "hijri";
 
 type CalendarCell =
   | {
@@ -41,6 +42,7 @@ type CalendarCell =
       tasks: Task[];
       status: DayStatus;
       isToday: boolean;
+      isPast: boolean;
       isSelected: boolean;
     };
 
@@ -62,6 +64,14 @@ const monthFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
   year: "numeric",
 });
 
+const hijriMonthFormatter = new Intl.DateTimeFormat(
+  "ar-SA-u-ca-islamic-umalqura",
+  {
+    month: "long",
+    year: "numeric",
+  },
+);
+
 const dateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
   day: "numeric",
   month: "long",
@@ -75,6 +85,10 @@ const hijriDateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura"
 });
 
 const hijriDayFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura", {
+  day: "numeric",
+});
+
+const gregorianDayFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
   day: "numeric",
 });
 
@@ -110,6 +124,10 @@ function formatMonth(monthIsoDate: string) {
   return monthFormatter.format(parseLocalDate(monthIsoDate));
 }
 
+function formatHijriMonth(monthIsoDate: string) {
+  return hijriMonthFormatter.format(parseLocalDate(monthIsoDate));
+}
+
 function formatDate(isoDate: string) {
   return dateFormatter.format(parseLocalDate(isoDate));
 }
@@ -120,6 +138,10 @@ function formatHijriDate(isoDate: string) {
 
 function formatHijriDay(isoDate: string) {
   return hijriDayFormatter.format(parseLocalDate(isoDate));
+}
+
+function formatGregorianDay(isoDate: string) {
+  return gregorianDayFormatter.format(parseLocalDate(isoDate));
 }
 
 function normalizeTask(task: Partial<Task>): Task {
@@ -259,6 +281,7 @@ function getCalendarCells(
       tasks,
       status,
       isToday: isoDate === today,
+      isPast: isoDate < today,
       isSelected: isoDate === selectedDate,
     };
   });
@@ -270,10 +293,15 @@ function App() {
   const [visibleMonth, setVisibleMonth] = useState(() => getMonthStart(new Date()));
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [taskDraft, setTaskDraft] = useState("");
-  const [showHijri, setShowHijri] = useState(true);
+  const [calendarMode, setCalendarMode] = useState<CalendarMode>("gregorian");
   const taskInputRef = useRef<HTMLInputElement>(null);
 
   const selectedTasks = selectedDate ? plan.tasksByDate[selectedDate] || [] : [];
+  const selectedDateIsPast = Boolean(selectedDate && selectedDate < today);
+  const isHijriMode = calendarMode === "hijri";
+  const visibleMonthTitle = isHijriMode
+    ? formatHijriMonth(visibleMonth)
+    : formatMonth(visibleMonth);
   const selectedCompletedTasks = selectedTasks.filter((task) => task.completed).length;
   const selectedProgress = selectedTasks.length
     ? Math.round((selectedCompletedTasks / selectedTasks.length) * 100)
@@ -306,13 +334,18 @@ function App() {
   }, [plan]);
 
   useEffect(() => {
-    if (!selectedDate) {
+    if (!selectedDate || selectedDate < today) {
+      return;
+    }
+
+    if (selectedDate < today) {
+      setSelectedDate(null);
       return;
     }
 
     setTaskDraft("");
     window.setTimeout(() => taskInputRef.current?.focus(), 120);
-  }, [selectedDate]);
+  }, [selectedDate, today]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -329,6 +362,10 @@ function App() {
     isoDate: string,
     updater: (tasks: Task[]) => Task[],
   ) => {
+    if (isoDate < today) {
+      return;
+    }
+
     setPlan((currentPlan) => {
       const nextTasks = updater(currentPlan.tasksByDate[isoDate] || []);
       const nextTasksByDate = { ...currentPlan.tasksByDate };
@@ -384,6 +421,7 @@ function App() {
     setVisibleMonth(getMonthStart(new Date()));
     setSelectedDate(null);
     setPlan((currentPlan) => ({ ...currentPlan, startDate: today }));
+    window.setTimeout(() => setSelectedDate(today), 0);
   };
 
   return (
@@ -392,12 +430,16 @@ function App() {
         <header className="calendar-header">
           <div className="top-actions">
             <button
-              aria-pressed={showHijri}
-              className={`text-toggle ${showHijri ? "active" : ""}`}
-              onClick={() => setShowHijri((current) => !current)}
+              aria-pressed={isHijriMode}
+              className={`text-toggle ${isHijriMode ? "active" : ""}`}
+              onClick={() =>
+                setCalendarMode((current) =>
+                  current === "gregorian" ? "hijri" : "gregorian",
+                )
+              }
               type="button"
             >
-              هجري
+              {isHijriMode ? "ميلادي" : "هجري"}
             </button>
             <button
               aria-label="تحديث والرجوع إلى اليوم"
@@ -425,7 +467,7 @@ function App() {
                 <CalendarDays size={18} aria-hidden="true" />
                 خطة المهام
               </span>
-              <h1>{formatMonth(visibleMonth)}</h1>
+              <h1>{visibleMonthTitle}</h1>
             </div>
             <button
               aria-label="الشهر التالي"
@@ -465,19 +507,32 @@ function App() {
             }
 
             const statusLabel = getStatusLabel(cell.status);
+            const primaryDay = isHijriMode
+              ? cell.hijriDay
+              : formatGregorianDay(cell.isoDate);
+            const secondaryDay = isHijriMode
+              ? formatGregorianDay(cell.isoDate)
+              : cell.hijriDay;
 
             return (
               <button
-                aria-label={`${formatDate(cell.isoDate)}، ${statusLabel}`}
-                className={`calendar-day status-${cell.status} ${
+                aria-label={`${formatDate(cell.isoDate)}، ${formatHijriDate(
+                  cell.isoDate,
+                )}، ${statusLabel}${
+                  cell.isPast ? "، يوم سابق غير قابل للتعديل" : ""
+                }`}
+                className={`day-cell calendar-day status-${cell.status} ${
                   cell.isToday ? "today" : ""
-                } ${cell.isSelected ? "selected" : ""}`}
+                } ${cell.isPast ? "past" : ""} ${
+                  cell.isSelected ? "selected" : ""
+                }`}
+                disabled={cell.isPast}
                 key={cell.isoDate}
                 onClick={() => setSelectedDate(cell.isoDate)}
                 type="button"
               >
-                <span className="gregorian-day">{cell.dayNumber}</span>
-                {showHijri && <span className="hijri-day">{cell.hijriDay}</span>}
+                <span className="gregorian-day">{primaryDay}</span>
+                <span className="hijri-day">{secondaryDay}</span>
                 {cell.tasks.length > 0 && (
                   <span className="task-count">{cell.tasks.length}</span>
                 )}
@@ -487,7 +542,7 @@ function App() {
         </section>
       </section>
 
-      {selectedDate && (
+      {selectedDate && !selectedDateIsPast && (
         <div className="sheet-layer">
           <button
             aria-label="إغلاق لوحة المهام"
@@ -506,8 +561,16 @@ function App() {
             <div className="sheet-header">
               <div>
                 <span className="sheet-kicker">مهام اليوم</span>
-                <h2 id="sheet-title">{formatDate(selectedDate)}</h2>
-                {showHijri && <p>{formatHijriDate(selectedDate)}</p>}
+                <h2 id="sheet-title">
+                  {isHijriMode
+                    ? formatHijriDate(selectedDate)
+                    : formatDate(selectedDate)}
+                </h2>
+                <p>
+                  {isHijriMode
+                    ? formatDate(selectedDate)
+                    : formatHijriDate(selectedDate)}
+                </p>
               </div>
               <button
                 aria-label="إغلاق"

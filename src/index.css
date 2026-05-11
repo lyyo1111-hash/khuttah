@@ -304,6 +304,17 @@ p {
     0 10px 26px rgb(37 99 235 / 17%);
 }
 
+.day-cell.past {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.day-cell.past:hover {
+  box-shadow: none;
+  transform: none;
+}
+
 .gregorian-day {
   color: var(--ink);
   font-size: 20px;
