@@ -1,12 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarDays,
-  CheckCircle2,
-  Circle,
-  CircleAlert,
-  ListTodo,
-  Minus,
+  Check,
+  ChevronLeft,
+  ChevronRight,
   Plus,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
@@ -15,12 +14,6 @@ type Task = {
   id: string;
   title: string;
   completed: boolean;
-};
-
-type PlanDay = {
-  dayNumber: number;
-  isoDate: string;
-  tasks: Task[];
 };
 
 type StoredPlan = {
@@ -33,22 +26,56 @@ type LegacyStoredPlan = Partial<StoredPlan> & {
   days?: Array<{ isoDate: string; tasks?: Task[] }>;
 };
 
-type Filter = "all" | "completed" | "incomplete";
-type DayStatus = "complete" | "incomplete" | "idle";
+type DayStatus = "empty" | "complete" | "partial" | "none";
+
+type CalendarCell =
+  | {
+      kind: "empty";
+      id: string;
+    }
+  | {
+      kind: "day";
+      isoDate: string;
+      dayNumber: number;
+      hijriDay: string;
+      tasks: Task[];
+      status: DayStatus;
+      isToday: boolean;
+      isSelected: boolean;
+    };
 
 const DEFAULT_DAY_COUNT = 14;
-const MIN_DAY_COUNT = 1;
-const MAX_DAY_COUNT = 60;
 const STORAGE_KEY = "fourteen-day-plan-tracker";
+const WEEKDAYS = [
+  "الأحد",
+  "السبت",
+  "الجمعة",
+  "الخميس",
+  "الأربعاء",
+  "الثلاثاء",
+  "الاثنين",
+];
+const WEEKDAY_INDEX_BY_DAY = [0, 6, 5, 4, 3, 2, 1];
 
-const dateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
-  day: "2-digit",
+const monthFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
   month: "long",
   year: "numeric",
 });
 
-const weekdayFormatter = new Intl.DateTimeFormat("ar-SA", {
-  weekday: "long",
+const dateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+
+const hijriDateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+
+const hijriDayFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura", {
+  day: "numeric",
 });
 
 function createTaskId() {
@@ -57,14 +84,6 @@ function createTaskId() {
   }
 
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function clampDayCount(value: number) {
-  if (!Number.isFinite(value)) {
-    return DEFAULT_DAY_COUNT;
-  }
-
-  return Math.min(MAX_DAY_COUNT, Math.max(MIN_DAY_COUNT, Math.round(value)));
 }
 
 function toIsoDate(date: Date) {
@@ -78,18 +97,29 @@ function parseLocalDate(isoDate: string) {
   return new Date(year, month - 1, day);
 }
 
-function addDays(isoDate: string, amount: number) {
-  const date = parseLocalDate(isoDate);
-  date.setDate(date.getDate() + amount);
-  return toIsoDate(date);
+function getMonthStart(date: Date) {
+  return toIsoDate(new Date(date.getFullYear(), date.getMonth(), 1));
+}
+
+function addMonths(monthIsoDate: string, amount: number) {
+  const date = parseLocalDate(monthIsoDate);
+  return getMonthStart(new Date(date.getFullYear(), date.getMonth() + amount, 1));
+}
+
+function formatMonth(monthIsoDate: string) {
+  return monthFormatter.format(parseLocalDate(monthIsoDate));
 }
 
 function formatDate(isoDate: string) {
   return dateFormatter.format(parseLocalDate(isoDate));
 }
 
-function formatWeekday(isoDate: string) {
-  return weekdayFormatter.format(parseLocalDate(isoDate));
+function formatHijriDate(isoDate: string) {
+  return hijriDateFormatter.format(parseLocalDate(isoDate));
+}
+
+function formatHijriDay(isoDate: string) {
+  return hijriDayFormatter.format(parseLocalDate(isoDate));
 }
 
 function normalizeTask(task: Partial<Task>): Task {
@@ -106,7 +136,7 @@ function normalizeTasksByDate(plan: LegacyStoredPlan) {
   if (plan.tasksByDate && typeof plan.tasksByDate === "object") {
     Object.entries(plan.tasksByDate).forEach(([isoDate, tasks]) => {
       tasksByDate[isoDate] = Array.isArray(tasks)
-        ? tasks.map((task) => normalizeTask(task))
+        ? tasks.map((task) => normalizeTask(task)).filter((task) => task.title)
         : [];
     });
   }
@@ -118,7 +148,7 @@ function normalizeTasksByDate(plan: LegacyStoredPlan) {
       }
 
       tasksByDate[day.isoDate] = Array.isArray(day.tasks)
-        ? day.tasks.map((task) => normalizeTask(task))
+        ? day.tasks.map((task) => normalizeTask(task)).filter((task) => task.title)
         : [];
     });
   }
@@ -136,8 +166,8 @@ function createEmptyPlan(today: string): StoredPlan {
 
 function normalizeStoredPlan(plan: LegacyStoredPlan, today: string): StoredPlan {
   return {
-    startDate: today,
-    dayCount: clampDayCount(plan.dayCount || plan.days?.length || DEFAULT_DAY_COUNT),
+    startDate: plan.startDate || today,
+    dayCount: plan.dayCount || plan.days?.length || DEFAULT_DAY_COUNT,
     tasksByDate: normalizeTasksByDate(plan),
   };
 }
@@ -159,86 +189,128 @@ function loadPlan(today: string): StoredPlan {
   }
 }
 
-function getVisibleDays(plan: StoredPlan): PlanDay[] {
-  return Array.from({ length: plan.dayCount }, (_, index) => {
-    const isoDate = addDays(plan.startDate, index);
+function getDayStatus(tasks: Task[]): DayStatus {
+  if (tasks.length === 0) {
+    return "empty";
+  }
+
+  const completedTasks = tasks.filter((task) => task.completed).length;
+
+  if (completedTasks === tasks.length) {
+    return "complete";
+  }
+
+  if (completedTasks > 0) {
+    return "partial";
+  }
+
+  return "none";
+}
+
+function getStatusLabel(status: DayStatus) {
+  if (status === "complete") {
+    return "كل المهام مكتملة";
+  }
+
+  if (status === "partial") {
+    return "بعض المهام مكتملة";
+  }
+
+  if (status === "none") {
+    return "لم تنجز أي مهمة";
+  }
+
+  return "بدون مهام";
+}
+
+function getCalendarCells(
+  monthIsoDate: string,
+  tasksByDate: Record<string, Task[]>,
+  today: string,
+  selectedDate: string | null,
+): CalendarCell[] {
+  const monthDate = parseLocalDate(monthIsoDate);
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const leadingCells = WEEKDAY_INDEX_BY_DAY[firstDay.getDay()];
+  const totalCells = Math.ceil((leadingCells + daysInMonth) / 7) * 7;
+
+  return Array.from({ length: totalCells }, (_, index) => {
+    const dayNumber = index - leadingCells + 1;
+
+    if (dayNumber < 1 || dayNumber > daysInMonth) {
+      return {
+        kind: "empty",
+        id: `empty-${monthIsoDate}-${index}`,
+      };
+    }
+
+    const isoDate = toIsoDate(new Date(year, month, dayNumber));
+    const tasks = tasksByDate[isoDate] || [];
+    const status = getDayStatus(tasks);
 
     return {
-      dayNumber: index + 1,
+      kind: "day",
       isoDate,
-      tasks: plan.tasksByDate[isoDate] || [],
+      dayNumber,
+      hijriDay: formatHijriDay(isoDate),
+      tasks,
+      status,
+      isToday: isoDate === today,
+      isSelected: isoDate === selectedDate,
     };
   });
-}
-
-function getDayStatus(day: PlanDay, today: string): DayStatus {
-  if (day.isoDate > today || day.tasks.length === 0) {
-    return "idle";
-  }
-
-  return day.tasks.every((task) => task.completed) ? "complete" : "incomplete";
-}
-
-function getDayStatusLabel(day: PlanDay, today: string) {
-  const status = getDayStatus(day, today);
-
-  if (status === "complete") {
-    return "مكتمل";
-  }
-
-  if (status === "incomplete") {
-    return "غير مكتمل";
-  }
-
-  return day.tasks.length === 0 ? "بدون مهام" : "لم يبدأ";
-}
-
-function renderStatusIcon(status: DayStatus) {
-  if (status === "complete") {
-    return <CheckCircle2 size={22} aria-hidden="true" />;
-  }
-
-  if (status === "incomplete") {
-    return <CircleAlert size={22} aria-hidden="true" />;
-  }
-
-  return <Circle size={22} aria-hidden="true" />;
 }
 
 function App() {
   const today = toIsoDate(new Date());
   const [plan, setPlan] = useState<StoredPlan>(() => loadPlan(today));
-  const [filter, setFilter] = useState<Filter>("all");
+  const [visibleMonth, setVisibleMonth] = useState(() => getMonthStart(new Date()));
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [drawerDraft, setDrawerDraft] = useState("");
+  const [taskDraft, setTaskDraft] = useState("");
+  const [showHijri, setShowHijri] = useState(true);
   const taskInputRef = useRef<HTMLInputElement>(null);
 
-  const days = useMemo(() => getVisibleDays(plan), [plan]);
-  const selectedDay = days.find((day) => day.isoDate === selectedDate) || null;
-  const planEndDate = addDays(plan.startDate, plan.dayCount - 1);
+  const selectedTasks = selectedDate ? plan.tasksByDate[selectedDate] || [] : [];
+  const selectedCompletedTasks = selectedTasks.filter((task) => task.completed).length;
+  const selectedProgress = selectedTasks.length
+    ? Math.round((selectedCompletedTasks / selectedTasks.length) * 100)
+    : 0;
 
-  useEffect(() => {
-    if (plan.startDate !== today) {
-      setPlan((currentPlan) => ({ ...currentPlan, startDate: today }));
-    }
-  }, [plan.startDate, today]);
+  const calendarCells = useMemo(
+    () => getCalendarCells(visibleMonth, plan.tasksByDate, today, selectedDate),
+    [visibleMonth, plan.tasksByDate, selectedDate, today],
+  );
+
+  const monthStats = useMemo(() => {
+    const monthDays = calendarCells.filter(
+      (cell): cell is Extract<CalendarCell, { kind: "day" }> =>
+        cell.kind === "day",
+    );
+    const monthTasks = monthDays.flatMap((day) => day.tasks);
+    const completedTasks = monthTasks.filter((task) => task.completed).length;
+
+    return {
+      totalTasks: monthTasks.length,
+      completedTasks,
+      progress: monthTasks.length
+        ? Math.round((completedTasks / monthTasks.length) * 100)
+        : 0,
+    };
+  }, [calendarCells]);
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(plan));
   }, [plan]);
 
   useEffect(() => {
-    if (selectedDate && !days.some((day) => day.isoDate === selectedDate)) {
-      setSelectedDate(null);
-    }
-  }, [days, selectedDate]);
-
-  useEffect(() => {
     if (!selectedDate) {
       return;
     }
 
-    setDrawerDraft("");
+    setTaskDraft("");
     window.setTimeout(() => taskInputRef.current?.focus(), 120);
   }, [selectedDate]);
 
@@ -253,95 +325,45 @@ function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, []);
 
-  const stats = useMemo(() => {
-    const allTasks = days.flatMap((day) => day.tasks);
-    const completedTasks = allTasks.filter((task) => task.completed).length;
-    const completedDays = days.filter(
-      (day) => getDayStatus(day, today) === "complete",
-    ).length;
-    const incompleteDays = days.filter(
-      (day) => getDayStatus(day, today) === "incomplete",
-    ).length;
-
-    return {
-      totalTasks: allTasks.length,
-      completedTasks,
-      completedDays,
-      incompleteDays,
-      progress: allTasks.length
-        ? Math.round((completedTasks / allTasks.length) * 100)
-        : 0,
-    };
-  }, [days, today]);
-
-  const filteredDays = useMemo(
-    () =>
-      days.filter((day) => {
-        const status = getDayStatus(day, today);
-
-        if (filter === "completed") {
-          return status === "complete";
-        }
-
-        if (filter === "incomplete") {
-          return status === "incomplete";
-        }
-
-        return true;
-      }),
-    [days, filter, today],
-  );
-
-  const filterOptions: Array<{ id: Filter; label: string; count: number }> = [
-    { id: "all", label: "الكل", count: days.length },
-    { id: "completed", label: "المكتمل", count: stats.completedDays },
-    { id: "incomplete", label: "غير المكتمل", count: stats.incompleteDays },
-  ];
-
-  const updateDayCount = (nextDayCount: number) => {
-    setPlan((currentPlan) => ({
-      ...currentPlan,
-      startDate: today,
-      dayCount: clampDayCount(nextDayCount),
-    }));
-  };
-
   const updateTasksForDay = (
     isoDate: string,
     updater: (tasks: Task[]) => Task[],
   ) => {
-    setPlan((currentPlan) => ({
-      ...currentPlan,
-      startDate: today,
-      tasksByDate: {
-        ...currentPlan.tasksByDate,
-        [isoDate]: updater(currentPlan.tasksByDate[isoDate] || []),
-      },
-    }));
+    setPlan((currentPlan) => {
+      const nextTasks = updater(currentPlan.tasksByDate[isoDate] || []);
+      const nextTasksByDate = { ...currentPlan.tasksByDate };
+
+      if (nextTasks.length > 0) {
+        nextTasksByDate[isoDate] = nextTasks;
+      } else {
+        delete nextTasksByDate[isoDate];
+      }
+
+      return {
+        ...currentPlan,
+        tasksByDate: nextTasksByDate,
+      };
+    });
   };
 
-  const openDayDrawer = (isoDate: string) => {
-    setSelectedDate(isoDate);
-  };
+  const addTask = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
 
-  const addTask = (isoDate: string) => {
-    const taskTitle = drawerDraft.trim();
+    if (!selectedDate) {
+      return;
+    }
+
+    const taskTitle = taskDraft.trim();
     if (!taskTitle) {
       return;
     }
 
-    updateTasksForDay(isoDate, (tasks) => [
+    updateTasksForDay(selectedDate, (tasks) => [
       ...tasks,
       { id: createTaskId(), title: taskTitle, completed: false },
     ]);
-    setDrawerDraft("");
+    setTaskDraft("");
     window.setTimeout(() => taskInputRef.current?.focus(), 0);
-  };
-
-  const updateTaskTitle = (isoDate: string, taskId: string, title: string) => {
-    updateTasksForDay(isoDate, (tasks) =>
-      tasks.map((task) => (task.id === taskId ? { ...task, title } : task)),
-    );
   };
 
   const toggleTask = (isoDate: string, taskId: string) => {
@@ -358,237 +380,199 @@ function App() {
     );
   };
 
+  const goToToday = () => {
+    setVisibleMonth(getMonthStart(new Date()));
+    setSelectedDate(null);
+    setPlan((currentPlan) => ({ ...currentPlan, startDate: today }));
+  };
+
   return (
-    <main className="app-shell" dir="rtl">
-      <header className="app-header">
-        <div className="header-content">
-          <div className="title-block">
-            <span className="eyebrow">
-              <CalendarDays size={18} aria-hidden="true" />
-              يبدأ من اليوم
-            </span>
-            <h1> خُطّة </h1>
-            <p>
-              {formatDate(plan.startDate)} - {formatDate(planEndDate)}
-            </p>
+    <main className="app-page" dir="rtl">
+      <section className="phone-container" aria-label="تقويم خطة المهام">
+        <header className="calendar-header">
+          <div className="top-actions">
+            <button
+              aria-pressed={showHijri}
+              className={`text-toggle ${showHijri ? "active" : ""}`}
+              onClick={() => setShowHijri((current) => !current)}
+              type="button"
+            >
+              هجري
+            </button>
+            <button
+              aria-label="تحديث والرجوع إلى اليوم"
+              className="icon-button"
+              onClick={goToToday}
+              title="تحديث"
+              type="button"
+            >
+              <RefreshCw size={19} aria-hidden="true" />
+            </button>
           </div>
 
-          <section className="progress-card" aria-label="نسبة إنجاز الخطة">
-            <div className="progress-card-top">
-              <span>التقدم الكلي</span>
-              <strong>{stats.progress}%</strong>
+          <div className="month-row">
+            <button
+              aria-label="الشهر السابق"
+              className="icon-button"
+              onClick={() => setVisibleMonth((month) => addMonths(month, -1))}
+              title="الشهر السابق"
+              type="button"
+            >
+              <ChevronRight size={22} aria-hidden="true" />
+            </button>
+            <div className="month-title">
+              <span>
+                <CalendarDays size={18} aria-hidden="true" />
+                خطة المهام
+              </span>
+              <h1>{formatMonth(visibleMonth)}</h1>
+            </div>
+            <button
+              aria-label="الشهر التالي"
+              className="icon-button"
+              onClick={() => setVisibleMonth((month) => addMonths(month, 1))}
+              title="الشهر التالي"
+              type="button"
+            >
+              <ChevronLeft size={22} aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="month-progress" aria-label="تقدم مهام الشهر">
+            <div>
+              <span>تقدم الشهر</span>
+              <strong>{monthStats.progress}%</strong>
             </div>
             <div className="progress-track" aria-hidden="true">
-              <span
-                className="progress-fill"
-                style={{ width: `${stats.progress}%` }}
-              />
+              <span style={{ width: `${monthStats.progress}%` }} />
             </div>
-            <div className="progress-meta">
-              <span>{stats.completedTasks} مكتملة</span>
-              <span>{stats.totalTasks} مهمة</span>
-            </div>
-          </section>
-        </div>
-      </header>
-
-      <section className="dashboard-bar" aria-label="إعدادات وملخص الخطة">
-        <div className="metric-card">
-          <span>الأيام</span>
-          <strong>{plan.dayCount}</strong>
-        </div>
-        <div className="metric-card">
-          <span>المكتمل</span>
-          <strong>{stats.completedDays}</strong>
-        </div>
-        <div className="metric-card">
-          <span>غير المكتمل</span>
-          <strong>{stats.incompleteDays}</strong>
-        </div>
-        <div className="days-control">
-          <span>عدد الأيام</span>
-          <div className="stepper">
-            <button
-              aria-label="تقليل عدد الأيام"
-              onClick={() => updateDayCount(plan.dayCount - 1)}
-              type="button"
-            >
-              <Minus size={16} aria-hidden="true" />
-            </button>
-            <input
-              aria-label="عدد أيام الخطة"
-              max={MAX_DAY_COUNT}
-              min={MIN_DAY_COUNT}
-              onChange={(event) => updateDayCount(Number(event.target.value))}
-              type="number"
-              value={plan.dayCount}
-            />
-            <button
-              aria-label="زيادة عدد الأيام"
-              onClick={() => updateDayCount(plan.dayCount + 1)}
-              type="button"
-            >
-              <Plus size={16} aria-hidden="true" />
-            </button>
+            <p>
+              {monthStats.completedTasks} مكتملة من {monthStats.totalTasks} مهمة
+            </p>
           </div>
-        </div>
-      </section>
+        </header>
 
-      <section className="planner-controls" aria-label="فلترة الأيام">
-        <div className="segmented-control">
-          {filterOptions.map((option) => (
-            <button
-              className={filter === option.id ? "active" : ""}
-              key={option.id}
-              onClick={() => setFilter(option.id)}
-              type="button"
-            >
-              <span>{option.label}</span>
-              <strong>{option.count}</strong>
-            </button>
+        <div className="weekday-grid" aria-hidden="true">
+          {WEEKDAYS.map((weekday) => (
+            <span key={weekday}>{weekday}</span>
           ))}
         </div>
+
+        <section className="calendar-grid" aria-label="أيام الشهر">
+          {calendarCells.map((cell) => {
+            if (cell.kind === "empty") {
+              return <span className="calendar-empty-cell" key={cell.id} />;
+            }
+
+            const statusLabel = getStatusLabel(cell.status);
+
+            return (
+              <button
+                aria-label={`${formatDate(cell.isoDate)}، ${statusLabel}`}
+                className={`calendar-day status-${cell.status} ${
+                  cell.isToday ? "today" : ""
+                } ${cell.isSelected ? "selected" : ""}`}
+                key={cell.isoDate}
+                onClick={() => setSelectedDate(cell.isoDate)}
+                type="button"
+              >
+                <span className="gregorian-day">{cell.dayNumber}</span>
+                {showHijri && <span className="hijri-day">{cell.hijriDay}</span>}
+                {cell.tasks.length > 0 && (
+                  <span className="task-count">{cell.tasks.length}</span>
+                )}
+              </button>
+            );
+          })}
+        </section>
       </section>
 
-      <section className="timeline-grid" aria-label="أيام الخطة">
-        {filteredDays.map((day) => {
-          const status = getDayStatus(day, today);
-          const statusLabel = getDayStatusLabel(day, today);
-
-          return (
-            <article className={`day-card status-${status}`} key={day.isoDate}>
-              <div className="day-card-top">
-                <span className="day-number">اليوم {day.dayNumber}</span>
-                <span
-                  aria-label={statusLabel}
-                  className={`status-icon ${status}`}
-                  role="img"
-                  title={statusLabel}
-                >
-                  {renderStatusIcon(status)}
-                </span>
-              </div>
-
-              <div className="day-card-main">
-                <h2>{formatWeekday(day.isoDate)}</h2>
-                <p>{formatDate(day.isoDate)}</p>
-              </div>
-
-              <div className="day-actions">
-                <button
-                  aria-label={`عرض مهام اليوم ${day.dayNumber}`}
-                  className="icon-button"
-                  onClick={() => openDayDrawer(day.isoDate)}
-                  title="عرض المهام"
-                  type="button"
-                >
-                  <ListTodo size={19} aria-hidden="true" />
-                </button>
-                <button
-                  aria-label={`إضافة مهمة لليوم ${day.dayNumber}`}
-                  className="icon-button primary"
-                  onClick={() => openDayDrawer(day.isoDate)}
-                  title="إضافة مهمة"
-                  type="button"
-                >
-                  <Plus size={19} aria-hidden="true" />
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </section>
-
-      {filteredDays.length === 0 && (
-        <p className="filter-empty">لا توجد أيام ضمن هذه الفلترة.</p>
-      )}
-
-      {selectedDay && (
-        <div className="drawer-layer">
+      {selectedDate && (
+        <div className="sheet-layer">
           <button
-            aria-label="إغلاق درج المهام"
-            className="drawer-backdrop"
+            aria-label="إغلاق لوحة المهام"
+            className="sheet-backdrop"
             onClick={() => setSelectedDate(null)}
             type="button"
           />
           <aside
-            aria-labelledby="drawer-title"
+            aria-labelledby="sheet-title"
             aria-modal="true"
-            className="task-drawer"
+            className="task-sheet"
             role="dialog"
           >
-            <div className="drawer-header">
+            <span className="sheet-handle" aria-hidden="true" />
+
+            <div className="sheet-header">
               <div>
-                <span>اليوم {selectedDay.dayNumber}</span>
-                <h2 id="drawer-title">{formatWeekday(selectedDay.isoDate)}</h2>
-                <p>{formatDate(selectedDay.isoDate)}</p>
+                <span className="sheet-kicker">مهام اليوم</span>
+                <h2 id="sheet-title">{formatDate(selectedDate)}</h2>
+                {showHijri && <p>{formatHijriDate(selectedDate)}</p>}
               </div>
               <button
                 aria-label="إغلاق"
-                className="drawer-close"
+                className="icon-button"
                 onClick={() => setSelectedDate(null)}
+                title="إغلاق"
                 type="button"
               >
                 <X size={20} aria-hidden="true" />
               </button>
             </div>
 
-            <form
-              className="drawer-add-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                addTask(selectedDay.isoDate);
-              }}
-            >
+            <div className="day-progress" aria-label="نسبة تقدم اليوم">
+              <div>
+                <span>نسبة التقدم</span>
+                <strong>{selectedProgress}%</strong>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <span style={{ width: `${selectedProgress}%` }} />
+              </div>
+              <p>
+                {selectedCompletedTasks} مكتملة من {selectedTasks.length} مهمة
+              </p>
+            </div>
+
+            <form className="task-form" onSubmit={addTask}>
               <input
-                aria-label="مهمة جديدة"
-                onChange={(event) => setDrawerDraft(event.target.value)}
-                placeholder="اكتب مهمة جديدة"
+                aria-label="إضافة مهمة"
+                onChange={(event) => setTaskDraft(event.target.value)}
+                placeholder="أضف مهمة لهذا اليوم"
                 ref={taskInputRef}
-                value={drawerDraft}
+                value={taskDraft}
               />
-              <button disabled={!drawerDraft.trim()} type="submit">
+              <button disabled={!taskDraft.trim()} type="submit">
                 <Plus size={18} aria-hidden="true" />
                 إضافة
               </button>
             </form>
 
-            <div className="drawer-task-list">
-              {selectedDay.tasks.length === 0 ? (
-                <p className="drawer-empty">لا توجد مهام لهذا اليوم.</p>
+            <div className="task-list">
+              {selectedTasks.length === 0 ? (
+                <p className="empty-tasks">لا توجد مهام لهذا اليوم.</p>
               ) : (
-                selectedDay.tasks.map((task) => (
+                selectedTasks.map((task) => (
                   <div
-                    className={`drawer-task-row ${
-                      task.completed ? "completed" : ""
-                    }`}
+                    className={`task-row ${task.completed ? "completed" : ""}`}
                     key={task.id}
                   >
-                    <label className="checkbox-wrap">
-                      <input
-                        checked={task.completed}
-                        onChange={() => toggleTask(selectedDay.isoDate, task.id)}
-                        type="checkbox"
-                      />
-                      <span />
-                    </label>
-                    <input
-                      aria-label="تعديل المهمة"
-                      className="drawer-task-input"
-                      onChange={(event) =>
-                        updateTaskTitle(
-                          selectedDay.isoDate,
-                          task.id,
-                          event.target.value,
-                        )
+                    <button
+                      aria-label={
+                        task.completed
+                          ? "تحديد المهمة كغير مكتملة"
+                          : "تحديد المهمة كمكتملة"
                       }
-                      placeholder="مهمة بدون عنوان"
-                      value={task.title}
-                    />
+                      className="task-check"
+                      onClick={() => toggleTask(selectedDate, task.id)}
+                      type="button"
+                    >
+                      {task.completed && <Check size={16} aria-hidden="true" />}
+                    </button>
+                    <span>{task.title}</span>
                     <button
                       aria-label="حذف المهمة"
                       className="delete-button"
-                      onClick={() => deleteTask(selectedDay.isoDate, task.id)}
+                      onClick={() => deleteTask(selectedDate, task.id)}
                       title="حذف المهمة"
                       type="button"
                     >
